@@ -8,6 +8,7 @@
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include <json_config.h>
 #include <sys/ioctl.h>
@@ -354,6 +355,7 @@ static void load_config_file(void) {
 #define MOTOR_CRUISE 0x7
 #define MOTOR_SPEED_AXIS 0x8
 
+#define MOTOR_ACTIVE_FLAG "/run/motors-active"
 #define PID_SIZE 32
 
 enum motor_status {
@@ -697,6 +699,34 @@ int create_pid(char *file_name) {
   return 0;
 }
 
+static void write_motion_active_flag() {
+  int fd = open(MOTOR_ACTIVE_FLAG, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  if (fd >= 0) {
+    const char payload[] = "active\n";
+    (void)write(fd, payload, sizeof(payload) - 1);
+    close(fd);
+  }
+}
+
+static void remove_motion_active_flag() { unlink(MOTOR_ACTIVE_FLAG); }
+
+static void *motion_active_tracker(void *arg) {
+  (void)arg;
+  while (motor_is_busy()) {
+    usleep(100 * 1000);
+  }
+  remove_motion_active_flag();
+  return NULL;
+}
+
+static void start_motion_active_tracker() {
+  write_motion_active_flag();
+  pthread_t tid;
+  if (pthread_create(&tid, NULL, motion_active_tracker, NULL) == 0) {
+    pthread_detach(tid);
+  }
+}
+
 static void daemonsetup() {
   pid_t pid;
 
@@ -902,6 +932,7 @@ int main(int argc, char *argv[]) {
           motor_steps(request_message.x, request_message.y, last_known_speed);
           syslog(LOG_DEBUG, "request x is %i", request_message.x);
           syslog(LOG_DEBUG, "request y is %i", request_message.y);
+          start_motion_active_tracker();
           break;
         case 'h': // absolute movement
           motor_status_get(&motor_message);
@@ -916,26 +947,32 @@ int main(int argc, char *argv[]) {
                              last_known_speed);
           syslog(LOG_DEBUG, "request x is %i", request_message.x);
           syslog(LOG_DEBUG, "request y is %i", request_message.y);
+          start_motion_active_tracker();
           break;
         case 'b': // go back
           motor_ioctl(MOTOR_GOBACK, NULL);
+          start_motion_active_tracker();
           break;
         case 'c': // cruise
           motor_ioctl(MOTOR_CRUISE, NULL);
+          start_motion_active_tracker();
           break;
         case 's': // stop
           motor_ioctl(MOTOR_STOP, NULL);
+          remove_motion_active_flag();
           break;
         }
         break;
       case 'r': // reset (homing)
         syslog(LOG_DEBUG, "== Enhanced homing (reset), please wait");
+        write_motion_active_flag();
         if (enhanced_homing_daemon(last_known_speed) != 0) {
           syslog(LOG_DEBUG,
                  "Enhanced homing failed, falling back to legacy MOTOR_RESET.");
           memset(&motor_reset_data, 0, sizeof(motor_reset_data));
           motor_ioctl(MOTOR_RESET, &motor_reset_data);
         }
+        remove_motion_active_flag();
         break;
       case 'i': // get initial parameters
         // This doesnt seem right, we are returning current information instead
@@ -1009,6 +1046,7 @@ int main(int argc, char *argv[]) {
   }
 
   syslog(LOG_INFO, "motors-daemon terminated.");
+  remove_motion_active_flag();
   unlink(pid_file);
   closelog();
 
