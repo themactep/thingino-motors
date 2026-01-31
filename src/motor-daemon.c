@@ -542,13 +542,8 @@ void motor_set_position(int xpos, int ypos, int stepspeed) {
   int deltax = xpos - msg.x;
   int deltay = ypos - msg.y;
 
-  // Apply inversion to deltas based on the inversion state
-  if (motor_inversion_state & MOTOR_INVERT_X) {
-    deltax = -deltax;
-  }
-  if (motor_inversion_state & MOTOR_INVERT_Y) {
-    deltay = -deltay;
-  }
+  // Don't apply inversion here - motor_steps() handles coordinate system
+  // conversion and inversion flags
 
   syslog(LOG_DEBUG, "Starting absolute move");
   int eff_speed = stepspeed;
