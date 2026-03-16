@@ -74,7 +74,9 @@ static int json_get_int_jct(JsonValue *obj, const char *key, int *out) {
     return 0;
 
   if (value->type == JSON_NUMBER) {
-    *out = (int)value->value.number;
+    *out = (int)(value->value.number.kind == JSON_NUMBER_INT
+                     ? value->value.number.integer
+                     : value->value.number.real);
     return 1;
   }
 
@@ -116,7 +118,9 @@ static int json_get_bool_jct(JsonValue *obj, const char *key, bool *out) {
   }
 
   if (value->type == JSON_NUMBER) {
-    *out = (value->value.number != 0);
+    *out = (value->value.number.kind == JSON_NUMBER_INT
+                ? value->value.number.integer != 0
+                : value->value.number.real != 0.0);
     return 1;
   }
 

@@ -40,7 +40,9 @@ static int json_get_int_jct(JsonValue *obj, const char *key, int *out) {
     return 0;
 
   if (value->type == JSON_NUMBER) {
-    *out = (int)value->value.number;
+    *out = (int)(value->value.number.kind == JSON_NUMBER_INT
+                     ? value->value.number.integer
+                     : value->value.number.real);
     return 1;
   }
 
