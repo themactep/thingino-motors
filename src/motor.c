@@ -1,10 +1,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <syslog.h>
 #include <unistd.h>
 
@@ -30,6 +32,72 @@ typedef struct {
   int loaded;
 } ClientCfg;
 static ClientCfg c_cfg = {0};
+
+static bool debug_mode = false;
+
+enum motor_status {
+  MOTOR_IS_STOP,
+  MOTOR_IS_RUNNING,
+};
+
+struct request {
+  char command; // d,r,s,p,b,S,i,j (move, reset,set speed,get position, is
+                // busy,Status,initial,JSON)
+  char type;    // g,h,c,s (absolute,relative,cruise,stop)
+  int x;
+  int got_x;
+  int y;
+  int got_y;
+  int speed;           // Add speed to the request structure
+  bool speed_supplied; // Track if speed was supplied
+};
+
+struct motor_message {
+  int x;
+  int y;
+  enum motor_status status;
+  int speed;
+  /* these two members are not standard from the original kernel module */
+  unsigned int x_max_steps;
+  unsigned int y_max_steps;
+  unsigned int inversion_state; // Report the inversion state
+};
+
+static bool value_is_truthy(const char *value) {
+  if (!value || !*value)
+    return false;
+  if (!strcmp(value, "0"))
+    return false;
+  if (!strcasecmp(value, "false"))
+    return false;
+  if (!strcasecmp(value, "off"))
+    return false;
+  return true;
+}
+
+static bool env_debug_enabled(void) {
+  const char *env = getenv("DEBUG");
+  return value_is_truthy(env);
+}
+
+static void debug_log(const char *fmt, ...) {
+  if (!debug_mode)
+    return;
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(stdout, fmt, ap);
+  fputc('\n', stdout);
+  fflush(stdout);
+  va_end(ap);
+}
+
+static void log_request(const char *label, const struct request *req) {
+  if (!debug_mode || !req)
+    return;
+  debug_log("%s cmd=%c type=%c x=%d y=%d speed=%d supplied=%d", label,
+            req->command, req->type, req->x, req->y, req->speed,
+            req->speed_supplied ? 1 : 0);
+}
 
 static int json_get_int_jct(JsonValue *obj, const char *key, int *out) {
   if (!obj || obj->type != JSON_OBJECT || !key || !out)
@@ -98,34 +166,6 @@ static void load_client_config(void) {
 #define MOTOR_INVERT_X 0x1
 #define MOTOR_INVERT_Y 0x2
 #define MOTOR_INVERT_BOTH 0x3
-
-enum motor_status {
-  MOTOR_IS_STOP,
-  MOTOR_IS_RUNNING,
-};
-
-struct request {
-  char command; // d,r,s,p,b,S,i,j (move, reset,set speed,get position, is
-                // busy,Status,initial,JSON)
-  char type;    // g,h,c,s (absolute,relative,cruise,stop)
-  int x;
-  int got_x;
-  int y;
-  int got_y;
-  int speed;           // Add speed to the request structure
-  bool speed_supplied; // Track if speed was supplied
-};
-
-struct motor_message {
-  int x;
-  int y;
-  enum motor_status status;
-  int speed;
-  /* these two members are not standard from the original kernel module */
-  unsigned int x_max_steps;
-  unsigned int y_max_steps;
-  unsigned int inversion_state; // Report the inversion state
-};
 
 static void print_json_message(struct motor_message *message,
                                bool include_limits) {
@@ -230,8 +270,15 @@ int main(int argc, char *argv[]) {
   char *daemon_pid_file;
   struct request request_message;
   bool verbose = false; // Initialize verbose to false
+  bool has_command = false;
 
   initialize_request_message(&request_message);
+
+  debug_mode = env_debug_enabled();
+  if (debug_mode) {
+    verbose = true;
+    debug_log("Debug logging enabled via environment");
+  }
 
   // Load client config for defaults and set initial speed if provided
   load_client_config();
@@ -250,12 +297,23 @@ int main(int argc, char *argv[]) {
       stepspeed = cfg_speed;
   }
 
+  if (debug_mode) {
+    if (c_cfg.loaded) {
+      debug_log("Loaded config speeds pan=%d tilt=%d -> initial stepspeed=%d",
+                c_cfg.pan.speed, c_cfg.tilt.speed, stepspeed);
+    } else {
+      debug_log("No config file detected, using default stepspeed=%d",
+                stepspeed);
+    }
+  }
+
   // openlog ("motors app", LOG_PID, LOG_USER);
   daemon_pid_file = "/var/run/motors-daemon";
   if (check_daemon(daemon_pid_file) == 0) {
     printf("Motors daemon is NOT running, please start the daemon\n");
     exit(EXIT_FAILURE);
   }
+  debug_log("Motors daemon detected via %s", daemon_pid_file);
   // should open socket here
   struct sockaddr_un addr;
 
@@ -264,92 +322,118 @@ int main(int argc, char *argv[]) {
   if (serverfd == -1) {
     exit(EXIT_FAILURE);
   }
+  debug_log("Opening UNIX socket for %s", SV_SOCK_PATH);
   memset(&addr, 0, sizeof(struct sockaddr_un));
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, SV_SOCK_PATH, sizeof(addr.sun_path) - 1);
 
   // connect to the socket
+  debug_log("Connecting to %s", SV_SOCK_PATH);
   if (connect(serverfd, (struct sockaddr *)&addr, sizeof(struct sockaddr_un)) ==
       -1)
     exit(EXIT_FAILURE);
+  debug_log("Connected to %s (fd=%d)", SV_SOCK_PATH, serverfd);
 
-  while ((c = getopt(argc, argv, "d:s:x:y:jipSrvbI:")) != -1) {
+  while ((c = getopt(argc, argv, "d:s:x:y:jipSrvbI:D")) != -1) {
     switch (c) {
     case 'd':
       request_message.command = 'd';
       direction = optarg[0];
+      has_command = true;
       break;
     case 's':
       stepspeed = atoi(optarg);
       request_message.speed = stepspeed;
       request_message.speed_supplied =
           true; // Set speed_supplied to true when speed is provided
-      request_message.command = 's';
+      debug_log("Speed override requested: %d", stepspeed);
       break;
     case 'x':
       request_message.x = atoi(optarg);
       request_message.got_x = 1;
+      debug_log("Parsed X argument: %d", request_message.x);
       break;
     case 'y':
       request_message.y = atoi(optarg);
       request_message.got_y = 1;
+      debug_log("Parsed Y argument: %d", request_message.y);
       break;
     case 'j':
       request_message.command = 'j';
+      has_command = true;
       if (verbose)
         print_request_message(&request_message);
+      log_request("TX", &request_message);
       write(serverfd, &request_message, sizeof(struct request));
 
       struct motor_message status;
       read(serverfd, &status, sizeof(struct motor_message));
+      debug_log("RX json status: x=%d y=%d speed=%d status=%d", status.x,
+                status.y, status.speed, status.status);
 
       JSON_status(&status);
       return 0;
     case 'i':
       // get all initial values
       request_message.command = 'i';
+      has_command = true;
       if (verbose)
         print_request_message(&request_message);
+      log_request("TX", &request_message);
       write(serverfd, &request_message, sizeof(struct request));
 
       struct motor_message initial;
       read(serverfd, &initial, sizeof(struct motor_message));
+      debug_log("RX init: x=%d y=%d xmax=%u ymax=%u speed=%d invert=%u",
+                initial.x, initial.y, initial.x_max_steps, initial.y_max_steps,
+                initial.speed, initial.inversion_state);
 
       JSON_initial(&initial);
       return 0;
     case 'p':
       request_message.command = 'p';
+      has_command = true;
       if (verbose)
         print_request_message(&request_message);
+      log_request("TX", &request_message);
       write(serverfd, &request_message, sizeof(struct request));
 
       struct motor_message pos;
       read(serverfd, &pos, sizeof(struct motor_message));
+      debug_log("RX position: x=%d y=%d", pos.x, pos.y);
 
       xy_pos(&pos);
       return 0;
     case 'v':
       verbose = true; // Enable verbose mode
       break;
+    case 'D':
+      debug_mode = true;
+      verbose = true;
+      debug_log("Debug logging enabled via -D flag");
+      break;
     case 'r': // reset
       request_message.command = 'r';
-      if (verbose)
-        print_request_message(&request_message);
-      write(serverfd, &request_message, sizeof(struct request));
-      return 0;
+      has_command = true;
+      break;
     case 'S': // status
       request_message.command = 'S';
+      has_command = true;
       if (verbose)
         print_request_message(&request_message);
+      log_request("TX", &request_message);
       write(serverfd, &request_message, sizeof(struct request));
 
       struct motor_message stat;
       read(serverfd, &stat, sizeof(struct motor_message));
+      debug_log("RX status: x=%d y=%d speed=%d status=%d", stat.x, stat.y,
+                stat.speed, stat.status);
 
       show_status(&stat);
       return 0;
     case 'I': // Invert motor
       request_message.command = 'I';
+      has_command = true;
       if (optarg) {
         if (strcmp(optarg, "x") == 0) {
           request_message.type = 'x'; // Invert X
@@ -367,16 +451,20 @@ int main(int argc, char *argv[]) {
 
       if (verbose)
         print_request_message(&request_message);
+      log_request("TX", &request_message);
       write(serverfd, &request_message, sizeof(struct request));
       return 0;
     case 'b': // is moving?
       request_message.command = 'b';
+      has_command = true;
       if (verbose)
         print_request_message(&request_message);
+      log_request("TX", &request_message);
       write(serverfd, &request_message, sizeof(struct request));
 
       struct motor_message busy;
       read(serverfd, &busy, sizeof(struct motor_message));
+      debug_log("RX busy: status=%d", busy.status);
       if (busy.status == MOTOR_IS_RUNNING) {
         printf("1\n");
         return (1);
@@ -393,8 +481,7 @@ int main(int argc, char *argv[]) {
           "\t -x X position/step (default 0)\n"
           "\t -y Y position/step (default 0) .\n"
           "\t -r reset to default pos.\n"
-          "\t -v verbose mode, prints debugging information while app is "
-          "running\n"
+          "\t -v verbose mode\n"
           "\t -j return json string xpos,ypos,status.\n"
           "\t -i return json string for all camera parameters\n"
           "\t -p return xpos,ypos as a string\n"
@@ -406,10 +493,15 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  if (request_message.speed_supplied && !has_command) {
+    request_message.command = 's';
+  }
+
   // If the command is speed only, send it and return
   if (request_message.command == 's') {
     if (verbose)
       print_request_message(&request_message);
+    log_request("TX", &request_message);
     write(serverfd, &request_message, sizeof(struct request));
     return 0;
   }
@@ -457,11 +549,13 @@ int main(int argc, char *argv[]) {
   }
 
   // Print and send the final request message if it's a move command
-  if (request_message.command == 'd') {
+  if (request_message.command == 'd' || request_message.command == 'r') {
     if (verbose)
       print_request_message(&request_message);
+    log_request("TX", &request_message);
     write(serverfd, &request_message, sizeof(struct request));
   }
 
+  debug_log("Command dispatched; exiting client");
   return 0;
 }
