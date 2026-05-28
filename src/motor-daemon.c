@@ -1660,7 +1660,7 @@ int main(int argc, char *argv[]) {
             }
 
             int rel_x = target_x - motor_message.x;
-            int rel_y = -(target_y - motor_message.y);
+            int rel_y = target_y - motor_message.y;
 
             request_message.x = target_x;
             request_message.y = target_y;
