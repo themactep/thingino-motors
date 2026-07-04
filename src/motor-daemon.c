@@ -816,11 +816,6 @@ void motor_set_position(int xpos, int ypos, int stepspeed) {
   int deltax = xpos - msg.x;
   int deltay = ypos - msg.y;
 
-  // Convert Y delta into the logical frame expected by motor_steps() where
-  // positive values mean "up". The kernel reports raw steps where positive
-  // deltas move the opposite direction, so flip here before handing over.
-  deltay = -deltay;
-
   syslog(LOG_DEBUG, "Starting absolute move");
   int eff_speed = stepspeed;
   syslog(LOG_DEBUG,
@@ -1660,7 +1655,7 @@ int main(int argc, char *argv[]) {
             }
 
             int rel_x = target_x - motor_message.x;
-            int rel_y = -(target_y - motor_message.y);
+            int rel_y = target_y - motor_message.y;
 
             request_message.x = target_x;
             request_message.y = target_y;
