@@ -398,7 +398,7 @@ static bool parse_legacy_layout(JsonValue *root) {
 }
 
 static void load_config_file(void) {
-  JsonValue *root = parse_json_file("/etc/motors.json");
+  JsonValue *root = parse_json_file("/etc/thingino.json");
   reset_config_defaults();
   if (!root) {
     syslog(LOG_DEBUG, "No config file found; using defaults");

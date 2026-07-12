@@ -128,7 +128,7 @@ static int json_get_int_jct(JsonValue *obj, const char *key, int *out) {
 }
 
 static void load_client_config(void) {
-  JsonValue *root = parse_json_file("/etc/motors.json");
+  JsonValue *root = parse_json_file("/etc/thingino.json");
 
   c_cfg.pan.speed = 0;
   c_cfg.tilt.speed = 0;
